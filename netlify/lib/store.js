@@ -1,16 +1,17 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { connectLambda, getStore } from "@netlify/blobs";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-/** Prefer /tmp on Lambda (read-only bundle FS); local uses repo `.data/`. */
+/**
+ * Avoid import.meta.url / fileURLToPath here.
+ * Netlify esbuild bundles this into CJS where import.meta.url is undefined,
+ * which crashed the function at load time (HTTP 502).
+ */
 function dataPaths() {
   const onLambda = Boolean(process.env.LAMBDA_TASK_ROOT || process.env.NETLIFY);
   const base = onLambda
     ? path.join("/tmp", "secret-santa-data")
-    : path.resolve(__dirname, "../../.data");
+    : path.resolve(process.cwd(), ".data");
   return {
     dir: base,
     file: path.join(base, "exchanges.json"),
