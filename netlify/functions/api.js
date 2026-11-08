@@ -5,6 +5,7 @@ import {
   findByParticipantCode,
   getExchange,
   indexParticipantCode,
+  initBlobs,
   saveExchange,
 } from "../lib/store.js";
 
@@ -43,20 +44,49 @@ async function requireModerator(exchange, pin) {
   return verifyPin(pin, exchange.pinHash);
 }
 
+function parseBody(event) {
+  if (!event.body) return {};
+  const raw = event.isBase64Encoded
+    ? Buffer.from(event.body, "base64").toString("utf8")
+    : event.body;
+  if (!raw) return {};
+  return JSON.parse(raw);
+}
+
+function requestPath(event) {
+  const candidates = [
+    event.path,
+    event.rawPath,
+    event.requestContext?.http?.path,
+  ].filter(Boolean);
+  let rawPath = candidates[0] || "/";
+  // Prefer a candidate that still includes /api or the function prefix when present
+  for (const c of candidates) {
+    if (c.includes("/api") || c.includes("/.netlify/functions/api")) {
+      rawPath = c;
+      break;
+    }
+  }
+  return (
+    rawPath
+      .replace(/^\/\.netlify\/functions\/api/, "")
+      .replace(/^\/api/, "")
+      .replace(/\/$/, "") || "/"
+  );
+}
+
 export async function handler(event) {
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 204, headers: corsHeaders, body: "" };
   }
 
   try {
-    const rawPath = event.path || "";
-    const path = rawPath
-      .replace(/^\/\.netlify\/functions\/api/, "")
-      .replace(/^\/api/, "")
-      .replace(/\/$/, "") || "/";
+    // Required for @netlify/blobs under Lambda-compatible handlers
+    initBlobs(event);
 
+    const path = requestPath(event);
     const method = event.httpMethod;
-    const body = event.body ? JSON.parse(event.body) : {};
+    const body = parseBody(event);
     const qs = event.queryStringParameters || {};
 
     // POST /exchanges — create

@@ -23,19 +23,32 @@ function showToast(message) {
 }
 
 async function api(path, options = {}) {
-  const res = await fetch(`/api${path}`, {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-    ...options,
-  });
-  let data = null;
+  let res;
   try {
-    data = await res.json();
+    res = await fetch(`/api${path}`, {
+      headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+      ...options,
+    });
   } catch {
-    data = {};
+    const err = new Error("network");
+    err.code = "network";
+    throw err;
+  }
+  const text = await res.text();
+  let data = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      const err = new Error("bad_response");
+      err.code = "bad_response";
+      err.status = res.status;
+      throw err;
+    }
   }
   if (!res.ok) {
     const err = new Error(data.error || "error");
-    err.code = data.error;
+    err.code = data.error || "server_error";
     err.status = res.status;
     throw err;
   }
@@ -52,8 +65,35 @@ function mapError(code) {
     impossible_draw: "impossible",
     invalid_pin: "invalidPin",
     invalid_name: "invalidName",
+    network: "errorNetwork",
+    bad_response: "errorGeneric",
+    server_error: "errorGeneric",
+    route_not_found: "errorGeneric",
   };
   return t(map[code] || "errorGeneric");
+}
+
+/** Accept bare codes or full share URLs that contain `#/r/<code>`. */
+function extractPrivateCode(raw) {
+  const value = String(raw || "").trim();
+  if (!value) return "";
+  const hashMatch = value.match(/#\/r\/([^/?#\s]+)/i);
+  if (hashMatch) {
+    try {
+      return decodeURIComponent(hashMatch[1]);
+    } catch {
+      return hashMatch[1];
+    }
+  }
+  const pathMatch = value.match(/\/r\/([^/?#\s]+)/i);
+  if (pathMatch) {
+    try {
+      return decodeURIComponent(pathMatch[1]);
+    } catch {
+      return pathMatch[1];
+    }
+  }
+  return value;
 }
 
 function revealUrl(code) {
@@ -137,8 +177,11 @@ function renderHome() {
 
   document.getElementById("codeForm").addEventListener("submit", (e) => {
     e.preventDefault();
-    const code = String(new FormData(e.target).get("code") || "").trim();
-    if (!code) return;
+    const code = extractPrivateCode(new FormData(e.target).get("code"));
+    if (!code) {
+      showToast(t("invalidCode"));
+      return;
+    }
     location.hash = `#/r/${encodeURIComponent(code)}`;
   });
 
