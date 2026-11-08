@@ -1,6 +1,6 @@
 node_modules/
 .data/
-.净lify/
+.netlify/
 dist/
 .env
 .env.*
