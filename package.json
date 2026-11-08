@@ -1,0 +1,29 @@
+{
+  "name": "secret-santa",
+  "version": "1.0.0",
+  "description": "Minimal mobile-first Secret Santa gift exchange for families (EN/ES), ready for Netlify.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node server.mjs",
+    "netlify:dev": "netlify dev",
+    "test:draw": "node --test test/draw.test.js"
+  },
+  "keywords": [
+    "secret-santa",
+    "amigo-secreto",
+    "netlify"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@netlify/blobs": "^11.1.8",
+    "bcryptjs": "^3.0.3"
+  },
+  "devDependencies": {
+    "netlify-cli": "^27.16.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
