@@ -1,4 +1,5 @@
 import { hashPin, verifyPin } from "../lib/auth.js";
+import { normalizeBudget } from "../lib/currencies.js";
 import { runDraw } from "../lib/draw.js";
 import { privateCode, shortId } from "../lib/ids.js";
 import {
@@ -24,17 +25,30 @@ function json(statusCode, body) {
   };
 }
 
-function publicExchange(exchange, { includeCodes = false } = {}) {
+function publicParticipant(p, { includeCodes = false, includeTracking = false } = {}) {
+  return {
+    id: p.id,
+    name: p.name,
+    ...(includeCodes ? { code: p.code } : {}),
+    ...(includeTracking
+      ? {
+          linkSentAt: p.linkSentAt || null,
+          revealedAt: p.revealedAt || null,
+        }
+      : {}),
+  };
+}
+
+function publicExchange(exchange, { includeCodes = false, includeTracking = false } = {}) {
   return {
     id: exchange.id,
     name: exchange.name,
     status: exchange.status,
     createdAt: exchange.createdAt,
-    participants: exchange.participants.map((p) => ({
-      id: p.id,
-      name: p.name,
-      ...(includeCodes ? { code: p.code } : {}),
-    })),
+    budget: exchange.budget || null,
+    participants: exchange.participants.map((p) =>
+      publicParticipant(p, { includeCodes, includeTracking })
+    ),
     exclusions: exchange.exclusions,
     drawnAt: exchange.drawnAt || null,
   };
@@ -60,7 +74,6 @@ function requestPath(event) {
     event.requestContext?.http?.path,
   ].filter(Boolean);
   let rawPath = candidates[0] || "/";
-  // Prefer a candidate that still includes /api or the function prefix when present
   for (const c of candidates) {
     if (c.includes("/api") || c.includes("/.netlify/functions/api")) {
       rawPath = c;
@@ -75,13 +88,23 @@ function requestPath(event) {
   );
 }
 
+function parseBudgetField(body) {
+  if (body.budget === undefined) return undefined;
+  if (body.budget === null || body.budget === false) return null;
+  try {
+    return normalizeBudget(body.budget);
+  } catch (err) {
+    err.httpCode = 400;
+    throw err;
+  }
+}
+
 export async function handler(event) {
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 204, headers: corsHeaders, body: "" };
   }
 
   try {
-    // Required for @netlify/blobs under Lambda-compatible handlers
     initBlobs(event);
 
     const path = requestPath(event);
@@ -99,6 +122,14 @@ export async function handler(event) {
       if (!/^\d{4,8}$/.test(pin)) {
         return json(400, { error: "invalid_pin" });
       }
+      let budget = null;
+      if (body.budget != null && body.budget !== false) {
+        try {
+          budget = normalizeBudget(body.budget);
+        } catch (err) {
+          return json(400, { error: err.code || "invalid_budget" });
+        }
+      }
       const exchange = {
         id: shortId(8),
         name,
@@ -109,9 +140,12 @@ export async function handler(event) {
         exclusions: [],
         assignments: null,
         drawnAt: null,
+        budget,
       };
       await saveExchange(exchange);
-      return json(201, { exchange: publicExchange(exchange, { includeCodes: true }) });
+      return json(201, {
+        exchange: publicExchange(exchange, { includeCodes: true, includeTracking: true }),
+      });
     }
 
     // GET /exchanges/:id
@@ -123,7 +157,10 @@ export async function handler(event) {
       const isMod = pin ? await requireModerator(exchange, pin) : false;
       if (pin && !isMod) return json(401, { error: "bad_pin" });
       return json(200, {
-        exchange: publicExchange(exchange, { includeCodes: isMod }),
+        exchange: publicExchange(exchange, {
+          includeCodes: isMod,
+          includeTracking: isMod,
+        }),
         isModerator: isMod,
       });
     }
@@ -136,8 +173,28 @@ export async function handler(event) {
       const ok = await requireModerator(exchange, body.pin);
       if (!ok) return json(401, { error: "bad_pin" });
       return json(200, {
-        exchange: publicExchange(exchange, { includeCodes: true }),
+        exchange: publicExchange(exchange, { includeCodes: true, includeTracking: true }),
         isModerator: true,
+      });
+    }
+
+    // PUT /exchanges/:id/budget
+    const budgetMatch = path.match(/^\/exchanges\/([^/]+)\/budget$/);
+    if (method === "PUT" && budgetMatch) {
+      const exchange = await getExchange(budgetMatch[1]);
+      if (!exchange) return json(404, { error: "not_found" });
+      if (!(await requireModerator(exchange, body.pin))) {
+        return json(401, { error: "bad_pin" });
+      }
+      try {
+        const next = parseBudgetField(body);
+        exchange.budget = next === undefined ? exchange.budget || null : next;
+      } catch (err) {
+        return json(400, { error: err.code || "invalid_budget" });
+      }
+      await saveExchange(exchange);
+      return json(200, {
+        exchange: publicExchange(exchange, { includeCodes: true, includeTracking: true }),
       });
     }
 
@@ -166,13 +223,37 @@ export async function handler(event) {
         id: shortId(5),
         name,
         code: privateCode(),
+        linkSentAt: null,
+        revealedAt: null,
       };
       exchange.participants.push(participant);
       await saveExchange(exchange);
       await indexParticipantCode(participant.code, exchange.id, participant.id);
       return json(201, {
-        participant: { id: participant.id, name: participant.name, code: participant.code },
-        exchange: publicExchange(exchange, { includeCodes: true }),
+        participant: publicParticipant(participant, {
+          includeCodes: true,
+          includeTracking: true,
+        }),
+        exchange: publicExchange(exchange, { includeCodes: true, includeTracking: true }),
+      });
+    }
+
+    // POST /exchanges/:id/participants/:pid/sent — mark private link as sent
+    const sentMatch = path.match(/^\/exchanges\/([^/]+)\/participants\/([^/]+)\/sent$/);
+    if (method === "POST" && sentMatch) {
+      const exchange = await getExchange(sentMatch[1]);
+      if (!exchange) return json(404, { error: "not_found" });
+      if (!(await requireModerator(exchange, body.pin))) {
+        return json(401, { error: "bad_pin" });
+      }
+      const participant = exchange.participants.find((p) => p.id === sentMatch[2]);
+      if (!participant) return json(404, { error: "not_found" });
+      if (!participant.linkSentAt) {
+        participant.linkSentAt = new Date().toISOString();
+        await saveExchange(exchange);
+      }
+      return json(200, {
+        exchange: publicExchange(exchange, { includeCodes: true, includeTracking: true }),
       });
     }
 
@@ -194,7 +275,9 @@ export async function handler(event) {
         (e) => e.from !== pid && e.to !== pid
       );
       await saveExchange(exchange);
-      return json(200, { exchange: publicExchange(exchange, { includeCodes: true }) });
+      return json(200, {
+        exchange: publicExchange(exchange, { includeCodes: true, includeTracking: true }),
+      });
     }
 
     // PUT /exchanges/:id/exclusions
@@ -217,7 +300,9 @@ export async function handler(event) {
       }
       exchange.exclusions = cleaned;
       await saveExchange(exchange);
-      return json(200, { exchange: publicExchange(exchange, { includeCodes: true }) });
+      return json(200, {
+        exchange: publicExchange(exchange, { includeCodes: true, includeTracking: true }),
+      });
     }
 
     // POST /exchanges/:id/draw
@@ -245,9 +330,8 @@ export async function handler(event) {
       exchange.status = "drawn";
       exchange.drawnAt = new Date().toISOString();
       await saveExchange(exchange);
-      // True secrecy: do not return the map — only share links
       return json(200, {
-        exchange: publicExchange(exchange, { includeCodes: true }),
+        exchange: publicExchange(exchange, { includeCodes: true, includeTracking: true }),
         ok: true,
       });
     }
@@ -265,15 +349,21 @@ export async function handler(event) {
           ready: false,
           exchangeName: exchange.name,
           yourName: me.name,
+          budget: exchange.budget || null,
         });
       }
       const receiverId = exchange.assignments[participantId];
       const receiver = exchange.participants.find((p) => p.id === receiverId);
+      if (!me.revealedAt) {
+        me.revealedAt = new Date().toISOString();
+        await saveExchange(exchange);
+      }
       return json(200, {
         ready: true,
         exchangeName: exchange.name,
         yourName: me.name,
         giveTo: receiver?.name || "?",
+        budget: exchange.budget || null,
       });
     }
 
